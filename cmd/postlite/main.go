@@ -30,6 +30,9 @@ func run(ctx context.Context) error {
 	flag.StringVar(&addr, "addr", addr, "postgres protocol bind address")
 	flag.Parse()
 
+	log.SetFlags(0)
+	log.SetPrefix("postlite: ")
+
 	s := postlite.NewServer()
 	s.Addr = addr
 	if err := s.Open(); err != nil {
