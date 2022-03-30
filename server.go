@@ -47,6 +47,8 @@ func (s *Server) Close() (err error) {
 	}
 	s.cancel()
 
+	// TODO: Track and close all open connections.
+
 	if err := s.g.Wait(); err != nil {
 		return err
 	}
@@ -146,8 +148,8 @@ func (s *Server) handleQueryMessage(ctx context.Context, c *Conn, msg *pgproto3.
 	log.Printf("received query: %q", msg.String)
 
 	// TODO: Verify conn.db exists.
-	// TODO: Execute msg.String against database.
-	// TODO:
+	// TODO: Execute msg.String against msg.Parameters["database"].
+	// TODO: Send pgproto3.ErrorResponse{} on error?
 
 	response := []byte("foobar")
 
