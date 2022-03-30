@@ -11,11 +11,6 @@ import (
 	"github.com/benbjohnson/postlite"
 )
 
-// Command line flags
-var (
-	addr = ":5432"
-)
-
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -27,14 +22,19 @@ func main() {
 }
 
 func run(ctx context.Context) error {
-	flag.StringVar(&addr, "addr", addr, "postgres protocol bind address")
+	addr := flag.String("addr", ":5432", "postgres protocol bind address")
+	dataDir := flag.String("data-dir", "", "data directory")
 	flag.Parse()
 
+	if *dataDir == "" {
+		return fmt.Errorf("required: -data-dir PATH")
+	}
+
 	log.SetFlags(0)
-	log.SetPrefix("postlite: ")
 
 	s := postlite.NewServer()
-	s.Addr = addr
+	s.Addr = *addr
+	s.DataDir = *dataDir
 	if err := s.Open(); err != nil {
 		return err
 	}

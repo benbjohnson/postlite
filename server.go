@@ -4,16 +4,24 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 
 	"github.com/jackc/pgproto3/v2"
 	"github.com/jackc/pgtype"
+	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/sync/errgroup"
 )
 
 type Server struct {
-	ln net.Listener
+	mu    sync.Mutex
+	ln    net.Listener
+	conns map[*Conn]struct{}
 
 	g      errgroup.Group
 	ctx    context.Context
@@ -21,21 +29,36 @@ type Server struct {
 
 	// Bind address to listen to Postgres wire protocol.
 	Addr string
+
+	// Directory that holds SQLite databases.
+	DataDir string
 }
 
 func NewServer() *Server {
-	s := &Server{}
+	s := &Server{
+		conns: make(map[*Conn]struct{}),
+	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	return s
 }
 
 func (s *Server) Open() (err error) {
+	// Ensure data directory exists.
+	if _, err := os.Stat(s.DataDir); err != nil {
+		return err
+	}
+
 	s.ln, err = net.Listen("tcp", s.Addr)
 	if err != nil {
 		return err
 	}
 
-	s.g.Go(s.serve)
+	s.g.Go(func() error {
+		if err := s.serve(); s.ctx.Err() != nil {
+			return err // return error unless context canceled
+		}
+		return nil
+	})
 	return nil
 }
 
@@ -47,12 +70,40 @@ func (s *Server) Close() (err error) {
 	}
 	s.cancel()
 
-	// TODO: Track and close all open connections.
+	// Track and close all open connections.
+	if e := s.CloseClientConnections(); err == nil {
+		err = e
+	}
 
 	if err := s.g.Wait(); err != nil {
 		return err
 	}
-	return nil
+	return err
+}
+
+// CloseClientConnections disconnects all Postgres connections.
+func (s *Server) CloseClientConnections() (err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for conn := range s.conns {
+		if e := conn.Close(); err == nil {
+			err = e
+		}
+	}
+
+	s.conns = make(map[*Conn]struct{})
+
+	return err
+}
+
+// CloseClientConnection disconnects a Postgres connections.
+func (s *Server) CloseClientConnection(conn *Conn) (err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.conns, conn)
+	return conn.Close()
 }
 
 func (s *Server) serve() error {
@@ -63,10 +114,15 @@ func (s *Server) serve() error {
 		}
 		conn := newConn(c)
 
+		// Track live connections.
+		s.mu.Lock()
+		s.conns[conn] = struct{}{}
+		s.mu.Unlock()
+
 		log.Println("connection accepted: ", conn.RemoteAddr())
 
 		s.g.Go(func() error {
-			defer c.Close()
+			defer s.CloseClientConnection(conn)
 
 			if err := s.serveConn(s.ctx, conn); err != nil && s.ctx.Err() == nil {
 				log.Println("connection error, closing: %s", err)
@@ -125,16 +181,26 @@ func (s *Server) serveConnStartup(ctx context.Context, c *Conn) error {
 	}
 }
 
-func (s *Server) handleStartupMessage(ctx context.Context, c *Conn, msg *pgproto3.StartupMessage) error {
+func (s *Server) handleStartupMessage(ctx context.Context, c *Conn, msg *pgproto3.StartupMessage) (err error) {
 	log.Printf("received startup message: %#v", msg)
 
-	// TODO: Open SQL database for filepath.Join(s.DataDir, msg.database); attach to conn.db.
+	// Validate
+	name := getParameter(msg.Parameters, "database")
+	if name == "" {
+		return writeMessages(c, &pgproto3.ErrorResponse{Message: "database required"})
+	} else if strings.Contains(name, "..") {
+		return writeMessages(c, &pgproto3.ErrorResponse{Message: "invalid database name"})
+	}
 
-	buf := (&pgproto3.AuthenticationOk{}).Encode(nil)
-	buf = (&pgproto3.ReadyForQuery{TxStatus: 'I'}).Encode(buf)
+	// Open SQL database & attach to the connection.
+	if c.db, err = sql.Open("sqlite3", filepath.Join(s.DataDir, name)); err != nil {
+		return err
+	}
 
-	_, err := c.Write(buf)
-	return err
+	return writeMessages(c,
+		&pgproto3.AuthenticationOk{},
+		&pgproto3.ReadyForQuery{TxStatus: 'I'},
+	)
 }
 
 func (s *Server) handleSSLRequestMessage(ctx context.Context, c *Conn, msg *pgproto3.SSLRequest) error {
@@ -147,33 +213,63 @@ func (s *Server) handleSSLRequestMessage(ctx context.Context, c *Conn, msg *pgpr
 func (s *Server) handleQueryMessage(ctx context.Context, c *Conn, msg *pgproto3.Query) error {
 	log.Printf("received query: %q", msg.String)
 
-	// TODO: Verify conn.db exists.
-	// TODO: Execute msg.String against msg.Parameters["database"].
-	// TODO: Send pgproto3.ErrorResponse{} on error?
+	// Execute query against database.
+	rows, err := c.db.QueryContext(ctx, msg.String)
+	if err != nil {
+		return writeMessages(c,
+			&pgproto3.ErrorResponse{Message: err.Error()},
+			&pgproto3.ReadyForQuery{TxStatus: 'I'},
+		)
+	}
 
-	response := []byte("foobar")
+	// Encode header.
+	cols, err := rows.ColumnTypes()
+	if err != nil {
+		return fmt.Errorf("columns: %w", err)
+	}
 
-	buf := (&pgproto3.RowDescription{
-		Fields: []pgproto3.FieldDescription{
-			{
-				Name:                 []byte("fortune"),
-				TableOID:             0,
-				TableAttributeNumber: 0,
-				DataTypeOID:          pgtype.TextOID,
-				DataTypeSize:         -1,
-				TypeModifier:         -1,
-				Format:               0,
-			},
-		},
-	}).Encode(nil)
+	var desc pgproto3.RowDescription
+	for _, col := range cols {
+		desc.Fields = append(desc.Fields, pgproto3.FieldDescription{
+			Name:                 []byte(col.Name()),
+			TableOID:             0,
+			TableAttributeNumber: 0,
+			DataTypeOID:          pgtype.TextOID,
+			DataTypeSize:         -1,
+			TypeModifier:         -1,
+			Format:               0,
+		})
+	}
+	buf := desc.Encode(nil)
 
-	// TODO: Iterate over rows.
-	buf = (&pgproto3.DataRow{Values: [][]byte{response}}).Encode(buf)
+	// Iterate over each row and encode it to the wire protocol.
+	for rows.Next() {
+		refs := make([]interface{}, len(cols))
+		values := make([]interface{}, len(cols))
+		for i := range refs {
+			refs[i] = &values[i]
+		}
 
+		// Scan from SQLite database.
+		if err := rows.Scan(refs...); err != nil {
+			return fmt.Errorf("scan: %w", err)
+		}
+
+		// Convert to TEXT values to return over Postgres wire protocol.
+		row := pgproto3.DataRow{Values: make([][]byte, len(values))}
+		for i := range values {
+			row.Values[i] = []byte(fmt.Sprint(values[i]))
+		}
+
+		// Encode row.
+		buf = row.Encode(buf)
+	}
+
+	// Mark command complete and ready for next query.
 	buf = (&pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")}).Encode(buf)
 	buf = (&pgproto3.ReadyForQuery{TxStatus: 'I'}).Encode(buf)
 
-	_, err := c.Write(buf)
+	_, err = c.Write(buf)
 	return err
 }
 
@@ -188,4 +284,21 @@ func newConn(conn net.Conn) *Conn {
 		Conn:    conn,
 		backend: pgproto3.NewBackend(pgproto3.NewChunkReader(conn), conn),
 	}
+}
+
+func getParameter(m map[string]string, k string) string {
+	if m == nil {
+		return ""
+	}
+	return m[k]
+}
+
+// writeMessages writes all messages to a single buffer before sending.
+func writeMessages(w io.Writer, msgs ...pgproto3.Message) error {
+	var buf []byte
+	for _, msg := range msgs {
+		buf = msg.Encode(buf)
+	}
+	_, err := w.Write(buf)
+	return err
 }
