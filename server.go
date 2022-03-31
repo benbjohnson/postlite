@@ -86,10 +86,7 @@ func version() string { return "postlite v0.0.0" }
 
 func formatType(type_oid, typemod string) string { return "" }
 
-func show(name string) string {
-	println("dbg/show", name)
-	return ""
-}
+func show(name string) string { return "" }
 
 type Server struct {
 	mu    sync.Mutex
@@ -282,23 +279,28 @@ func (s *Server) handleStartupMessage(ctx context.Context, c *Conn, msg *pgproto
 		return err
 	}
 
+	// Attach an in-memory database for pg_catalog.
+	if _, err := c.db.ExecContext(ctx, `ATTACH ':memory:' AS pg_catalog`); err != nil {
+		return fmt.Errorf("attach pg_catalog: %w", err)
+	}
+
 	// Register virtual tables to imitate postgres.
-	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_namespace USING pg_namespace_module (oid, nspname, nspowner, nspacl)"); err != nil {
+	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_catalog.pg_namespace USING pg_namespace_module (oid, nspname, nspowner, nspacl)"); err != nil {
 		return fmt.Errorf("create pg_namespace: %w", err)
 	}
-	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_description USING pg_description_module (objoid, classoid, objsubid, description)"); err != nil {
+	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_catalog.pg_description USING pg_description_module (objoid, classoid, objsubid, description)"); err != nil {
 		return fmt.Errorf("create pg_description: %w", err)
 	}
-	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_database USING pg_database_module (oid, datname, datdba, encoding, datcollate, datctype, datistemplate, datallowconn, datconnlimit, datlastsysoid, datfrozenxid, datminmxid, dattablespace, datacl)"); err != nil {
+	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_catalog.pg_database USING pg_database_module (oid, datname, datdba, encoding, datcollate, datctype, datistemplate, datallowconn, datconnlimit, datlastsysoid, datfrozenxid, datminmxid, dattablespace, datacl)"); err != nil {
 		return fmt.Errorf("create pg_database: %w", err)
 	}
-	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_settings USING pg_settings_module (name, setting, unit, category, short_desc, extra_desc, context, vartype, source, min_val, max_val, enumvals, boot_val, reset_val, sourcefile, sourceline, pending_restart)"); err != nil {
+	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_catalog.pg_settings USING pg_settings_module (name, setting, unit, category, short_desc, extra_desc, context, vartype, source, min_val, max_val, enumvals, boot_val, reset_val, sourcefile, sourceline, pending_restart)"); err != nil {
 		return fmt.Errorf("create pg_settings: %w", err)
 	}
-	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_type USING pg_type_module (oid, typname, typnamespace, typowner, typlen, typbyval, typtype, typcategory, typispreferred, typisdefined, typdelim, typrelid, typelem, typarray, typinput, typoutput, typreceive, typsend, typmodin, typmodout, typanalyze, typalign, typstorage, typnotnull, typbasetype, typtypmod, typndims, typcollation, typdefaultbin, typdefault, typacl)"); err != nil {
+	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_catalog.pg_type USING pg_type_module (oid, typname, typnamespace, typowner, typlen, typbyval, typtype, typcategory, typispreferred, typisdefined, typdelim, typrelid, typelem, typarray, typinput, typoutput, typreceive, typsend, typmodin, typmodout, typanalyze, typalign, typstorage, typnotnull, typbasetype, typtypmod, typndims, typcollation, typdefaultbin, typdefault, typacl)"); err != nil {
 		return fmt.Errorf("create pg_type: %w", err)
 	}
-	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_class USING pg_class_module (oid, relname, relnamespace, reltype, reloftype, relowner, relam, relfilenode, reltablespace, relpages, reltuples, relallvisible, reltoastrelid, relhasindex, relisshared, relpersistence, relkind, relnatts, relchecks, relhasrules, relhastriggers, relhassubclass, relrowsecurity, relforcerowsecurity, relispopulated, relreplident, relispartition, relrewrite, relfrozenxid, relminmxid, relacl, reloptions, relpartbound)"); err != nil {
+	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_catalog.pg_class USING pg_class_module (oid, relname, relnamespace, reltype, reloftype, relowner, relam, relfilenode, reltablespace, relpages, reltuples, relallvisible, reltoastrelid, relhasindex, relisshared, relpersistence, relkind, relnatts, relchecks, relhasrules, relhastriggers, relhassubclass, relrowsecurity, relforcerowsecurity, relispopulated, relreplident, relispartition, relrewrite, relfrozenxid, relminmxid, relacl, reloptions, relpartbound)"); err != nil {
 		return fmt.Errorf("create pg_class: %w", err)
 	}
 
@@ -534,7 +536,7 @@ func rewriteQuery(q string) string {
 	q = castRegex.ReplaceAllString(q, "")
 
 	// Remove references to the pg_catalog.
-	q = pgCatalogRegex.ReplaceAllString(q, "")
+	// q = pgCatalogRegex.ReplaceAllString(q, "")
 
 	// Rewrite "SHOW" commands into function calls.
 	q = showRegex.ReplaceAllString(q, "SELECT show('$1')")
