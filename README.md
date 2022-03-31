@@ -1,4 +1,4 @@
-Postlite
+Postlite ![Status](https://img.shields.io/badge/status-alpha-yellow)
 ========
 
 Postlite is a network proxy to allow access to remote SQLite databases over the
