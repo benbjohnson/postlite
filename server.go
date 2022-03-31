@@ -42,6 +42,34 @@ func init() {
 			if err := conn.RegisterFunc("user", user, true); err != nil {
 				return fmt.Errorf("cannot register user() function")
 			}
+			if err := conn.RegisterFunc("show", show, true); err != nil {
+				return fmt.Errorf("cannot register show() function")
+			}
+			if err := conn.RegisterFunc("format_type", formatType, true); err != nil {
+				return fmt.Errorf("cannot register format_type() function")
+			}
+			if err := conn.RegisterFunc("version", version, true); err != nil {
+				return fmt.Errorf("cannot register version() function")
+			}
+
+			if err := conn.CreateModule("pg_namespace_module", &pgNamespaceModule{}); err != nil {
+				return fmt.Errorf("cannot register pg_namespace module")
+			}
+			if err := conn.CreateModule("pg_description_module", &pgDescriptionModule{}); err != nil {
+				return fmt.Errorf("cannot register pg_description module")
+			}
+			if err := conn.CreateModule("pg_database_module", &pgDatabaseModule{}); err != nil {
+				return fmt.Errorf("cannot register pg_database module")
+			}
+			if err := conn.CreateModule("pg_settings_module", &pgSettingsModule{}); err != nil {
+				return fmt.Errorf("cannot register pg_settings module")
+			}
+			if err := conn.CreateModule("pg_type_module", &pgTypeModule{}); err != nil {
+				return fmt.Errorf("cannot register pg_type module")
+			}
+			if err := conn.CreateModule("pg_class_module", &pgClassModule{}); err != nil {
+				return fmt.Errorf("cannot register pg_class module")
+			}
 			return nil
 		},
 	})
@@ -49,9 +77,19 @@ func init() {
 
 func currentCatalog() string { return "public" }
 func currentSchema() string  { return "public" }
-func currentUser() string    { return "sqlite3" }
-func sessionUser() string    { return "sqlite3" }
-func user() string           { return "sqlite3" }
+
+func currentUser() string { return "sqlite3" }
+func sessionUser() string { return "sqlite3" }
+func user() string        { return "sqlite3" }
+
+func version() string { return "postlite v0.0.0" }
+
+func formatType(type_oid, typemod string) string { return "" }
+
+func show(name string) string {
+	println("dbg/show", name)
+	return ""
+}
 
 type Server struct {
 	mu    sync.Mutex
@@ -244,6 +282,26 @@ func (s *Server) handleStartupMessage(ctx context.Context, c *Conn, msg *pgproto
 		return err
 	}
 
+	// Register virtual tables to imitate postgres.
+	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_namespace USING pg_namespace_module (oid, nspname, nspowner, nspacl)"); err != nil {
+		return fmt.Errorf("create pg_namespace: %w", err)
+	}
+	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_description USING pg_description_module (objoid, classoid, objsubid, description)"); err != nil {
+		return fmt.Errorf("create pg_description: %w", err)
+	}
+	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_database USING pg_database_module (oid, datname, datdba, encoding, datcollate, datctype, datistemplate, datallowconn, datconnlimit, datlastsysoid, datfrozenxid, datminmxid, dattablespace, datacl)"); err != nil {
+		return fmt.Errorf("create pg_database: %w", err)
+	}
+	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_settings USING pg_settings_module (name, setting, unit, category, short_desc, extra_desc, context, vartype, source, min_val, max_val, enumvals, boot_val, reset_val, sourcefile, sourceline, pending_restart)"); err != nil {
+		return fmt.Errorf("create pg_settings: %w", err)
+	}
+	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_type USING pg_type_module (oid, typname, typnamespace, typowner, typlen, typbyval, typtype, typcategory, typispreferred, typisdefined, typdelim, typrelid, typelem, typarray, typinput, typoutput, typreceive, typsend, typmodin, typmodout, typanalyze, typalign, typstorage, typnotnull, typbasetype, typtypmod, typndims, typcollation, typdefaultbin, typdefault, typacl)"); err != nil {
+		return fmt.Errorf("create pg_type: %w", err)
+	}
+	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_class USING pg_class_module (oid, relname, relnamespace, reltype, reloftype, relowner, relam, relfilenode, reltablespace, relpages, reltuples, relallvisible, reltoastrelid, relhasindex, relisshared, relpersistence, relkind, relnatts, relchecks, relhasrules, relhastriggers, relhassubclass, relrowsecurity, relforcerowsecurity, relispopulated, relreplident, relispartition, relrewrite, relfrozenxid, relminmxid, relacl, reloptions, relpartbound)"); err != nil {
+		return fmt.Errorf("create pg_class: %w", err)
+	}
+
 	return writeMessages(c,
 		&pgproto3.AuthenticationOk{},
 		&pgproto3.ParameterStatus{Name: "server_version", Value: ServerVersion},
@@ -346,20 +404,21 @@ func (s *Server) handleParseMessage(ctx context.Context, c *Conn, pmsg *pgproto3
 	// Prepare the query.
 	stmt, err := c.db.PrepareContext(ctx, query)
 	if err != nil {
-		return err
+		return fmt.Errorf("prepare: %w", err)
 	}
 
 	var rows *sql.Rows
 	var cols []*sql.ColumnType
+	var binds []interface{}
 	exec := func() (err error) {
 		if rows != nil {
 			return nil
 		}
-		if rows, err = stmt.QueryContext(ctx); err != nil {
-			return err
+		if rows, err = stmt.QueryContext(ctx, binds...); err != nil {
+			return fmt.Errorf("query: %w", err)
 		}
 		if cols, err = rows.ColumnTypes(); err != nil {
-			return err
+			return fmt.Errorf("column types: %w", err)
 		}
 		return nil
 	}
@@ -375,7 +434,10 @@ func (s *Server) handleParseMessage(ctx context.Context, c *Conn, pmsg *pgproto3
 
 		switch msg := msg.(type) {
 		case *pgproto3.Bind:
-			// ignore
+			binds = make([]interface{}, len(msg.Parameters))
+			for i := range msg.Parameters {
+				binds[i] = string(msg.Parameters[i])
+			}
 
 		case *pgproto3.Describe:
 			if err := exec(); err != nil {
@@ -458,6 +520,11 @@ func rewriteQuery(q string) string {
 		return `SELECT 'SET'`
 	}
 
+	// Ignore this god forsaken query for pulling keywords.
+	if strings.Contains(q, `select string_agg(word, ',') from pg_catalog.pg_get_keywords()`) {
+		return `SELECT '' AS "string_agg" WHERE 1 = 2`
+	}
+
 	// Rewrite system information variables so they are functions so we can inject them.
 	// https://www.postgresql.org/docs/9.1/functions-info.html
 	q = systemFunctionRegex.ReplaceAllString(q, "$1()$2")
@@ -466,6 +533,12 @@ func rewriteQuery(q string) string {
 	// https://www.postgresql.org/docs/7.3/sql-expressions.html#SQL-SYNTAX-TYPE-CASTS
 	q = castRegex.ReplaceAllString(q, "")
 
+	// Remove references to the pg_catalog.
+	q = pgCatalogRegex.ReplaceAllString(q, "")
+
+	// Rewrite "SHOW" commands into function calls.
+	q = showRegex.ReplaceAllString(q, "SELECT show('$1')")
+
 	return q
 }
 
@@ -473,4 +546,8 @@ var (
 	systemFunctionRegex = regexp.MustCompile(`\b(current_catalog|current_schema|current_user|session_user|user)\b([^\(]|$)`)
 
 	castRegex = regexp.MustCompile(`::(regclass)`)
+
+	pgCatalogRegex = regexp.MustCompile(`\bpg_catalog\.`)
+
+	showRegex = regexp.MustCompile(`^SHOW (\w+)`)
 )
