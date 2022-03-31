@@ -18,6 +18,18 @@ safe. If anything, the Postlite process may die but it shouldn't affect your
 database._
 
 
+## Supported clients
+
+Postgres clients can be quite particular about how they initialize so not all
+clients may work. Below are the clients that are currently being tested. If you
+would like to see more clients supported or if you're having issues with
+existing clients, please [submit an issue][new-issue]!
+
+- `psql`
+- [DBeaver](https://dbeaver.io/)
+- [Postico 2](https://eggerapps.at/postico2/)
+
+
 ## Usage
 
 To use Postlite, execute the command with the directory that contains your
