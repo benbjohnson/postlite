@@ -25,7 +25,7 @@ clients may work. Below are the clients that are currently being tested. If you
 would like to see more clients supported or if you're having issues with
 existing clients, please [submit an issue][new-issue]!
 
-- `psql`
+- [psql](https://www.postgresql.org/docs/current/app-psql.html)
 - [DBeaver](https://dbeaver.io/)
 - [Postico 2](https://eggerapps.at/postico2/)
 
