@@ -499,6 +499,19 @@ func newConn(conn net.Conn) *Conn {
 	}
 }
 
+func (c *Conn) Close() (err error) {
+	if c.db != nil {
+		if e := c.db.Close(); err == nil {
+			err = e
+		}
+	}
+
+	if e := c.Conn.Close(); err == nil {
+		err = e
+	}
+	return err
+}
+
 func getParameter(m map[string]string, k string) string {
 	if m == nil {
 		return ""

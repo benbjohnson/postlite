@@ -2,7 +2,20 @@ Postlite
 ========
 
 Postlite is a network proxy to allow access to remote SQLite databases over the
-Postgres wire protocol.
+Postgres wire protocol. This allows GUI tools to be used on remote SQLite
+databases which can make administration easier.
+
+The proxy works by translating Postgres frontend wire messages into SQLite
+transactions and converting results back into Postgres response wire messages.
+Many Postgres clients also inspect the `pg_catalog` to determine system
+information so Postlite mirrors this catalog by using an attached in-memory
+database with virtual tables. The proxy also performs minor rewriting on these
+system queries to convert them to usable SQLite syntax.
+
+_Note: This software is in alpha. Please report bugs. Postlite doesn't alter
+your database unless you issue INSERT, UPDATE, DELETE commands so it's probably
+safe. If anything, the Postlite process may die but it shouldn't affect your
+database._
 
 
 ## Usage
@@ -21,4 +34,14 @@ $ psql --host HOSTNAME my.db
 ```
 
 This will connect you to a SQLite database at the path `/data/my.db`.
+
+
+## Development
+
+Postlite uses virtual tables to simulate the `pg_catalog` so you will need to
+enable the `vtable` tag when building:
+
+```sh
+$ go install -tags vtable ./cmd/postlite
+```
 
