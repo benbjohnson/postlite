@@ -307,7 +307,7 @@ func (s *Server) handleStartupMessage(ctx context.Context, c *Conn, msg *pgproto
 		return fmt.Errorf("create pg_class: %w", err)
 	}
 	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_catalog.pg_range USING pg_range_module (rngtypid, rngsubtype, rngmultitypid, rngcollation, rngsubopc, rngcanonical, rngsubdiff)"); err != nil {
-		return fmt.Errorf("create pg_class: %w", err)
+		return fmt.Errorf("create pg_range: %w", err)
 	}
 
 	return writeMessages(c,
