@@ -70,6 +70,9 @@ func init() {
 			if err := conn.CreateModule("pg_class_module", &pgClassModule{}); err != nil {
 				return fmt.Errorf("cannot register pg_class module")
 			}
+			if err := conn.CreateModule("pg_range_module", &pgRangeModule{}); err != nil {
+				return fmt.Errorf("cannot register pg_range module")
+			}
 			return nil
 		},
 	})
@@ -302,6 +305,9 @@ func (s *Server) handleStartupMessage(ctx context.Context, c *Conn, msg *pgproto
 	}
 	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_catalog.pg_class USING pg_class_module (oid, relname, relnamespace, reltype, reloftype, relowner, relam, relfilenode, reltablespace, relpages, reltuples, relallvisible, reltoastrelid, relhasindex, relisshared, relpersistence, relkind, relnatts, relchecks, relhasrules, relhastriggers, relhassubclass, relrowsecurity, relforcerowsecurity, relispopulated, relreplident, relispartition, relrewrite, relfrozenxid, relminmxid, relacl, reloptions, relpartbound)"); err != nil {
 		return fmt.Errorf("create pg_class: %w", err)
+	}
+	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_catalog.pg_range USING pg_range_module (rngtypid, rngsubtype, rngmultitypid, rngcollation, rngsubopc, rngcanonical, rngsubdiff)"); err != nil {
+		return fmt.Errorf("create pg_range: %w", err)
 	}
 
 	return writeMessages(c,
