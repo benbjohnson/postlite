@@ -7,89 +7,25 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 
 	"github.com/jackc/pgproto3/v2"
 	"github.com/jackc/pgtype"
-	"github.com/mattn/go-sqlite3"
 	"golang.org/x/sync/errgroup"
+
+	vertigo "github.com/vertica/vertica-sql-go"
 )
+
+var _ = vertigo.VerticaContext.Deadline
 
 // Postgres settings.
 const (
 	ServerVersion = "13.0.0"
 )
-
-func init() {
-	sql.Register("postlite-sqlite3", &sqlite3.SQLiteDriver{
-		ConnectHook: func(conn *sqlite3.SQLiteConn) error {
-			if err := conn.RegisterFunc("current_catalog", currentCatalog, true); err != nil {
-				return fmt.Errorf("cannot register current_catalog() function")
-			}
-			if err := conn.RegisterFunc("current_schema", currentSchema, true); err != nil {
-				return fmt.Errorf("cannot register current_schema() function")
-			}
-			if err := conn.RegisterFunc("current_user", currentUser, true); err != nil {
-				return fmt.Errorf("cannot register current_schema() function")
-			}
-			if err := conn.RegisterFunc("session_user", sessionUser, true); err != nil {
-				return fmt.Errorf("cannot register session_user() function")
-			}
-			if err := conn.RegisterFunc("user", user, true); err != nil {
-				return fmt.Errorf("cannot register user() function")
-			}
-			if err := conn.RegisterFunc("show", show, true); err != nil {
-				return fmt.Errorf("cannot register show() function")
-			}
-			if err := conn.RegisterFunc("format_type", formatType, true); err != nil {
-				return fmt.Errorf("cannot register format_type() function")
-			}
-			if err := conn.RegisterFunc("version", version, true); err != nil {
-				return fmt.Errorf("cannot register version() function")
-			}
-
-			if err := conn.CreateModule("pg_namespace_module", &pgNamespaceModule{}); err != nil {
-				return fmt.Errorf("cannot register pg_namespace module")
-			}
-			if err := conn.CreateModule("pg_description_module", &pgDescriptionModule{}); err != nil {
-				return fmt.Errorf("cannot register pg_description module")
-			}
-			if err := conn.CreateModule("pg_database_module", &pgDatabaseModule{}); err != nil {
-				return fmt.Errorf("cannot register pg_database module")
-			}
-			if err := conn.CreateModule("pg_settings_module", &pgSettingsModule{}); err != nil {
-				return fmt.Errorf("cannot register pg_settings module")
-			}
-			if err := conn.CreateModule("pg_type_module", &pgTypeModule{}); err != nil {
-				return fmt.Errorf("cannot register pg_type module")
-			}
-			if err := conn.CreateModule("pg_class_module", &pgClassModule{}); err != nil {
-				return fmt.Errorf("cannot register pg_class module")
-			}
-			if err := conn.CreateModule("pg_range_module", &pgRangeModule{}); err != nil {
-				return fmt.Errorf("cannot register pg_range module")
-			}
-			return nil
-		},
-	})
-}
-
-func currentCatalog() string { return "public" }
-func currentSchema() string  { return "public" }
-
-func currentUser() string { return "sqlite3" }
-func sessionUser() string { return "sqlite3" }
-func user() string        { return "sqlite3" }
-
-func version() string { return "postlite v0.0.0" }
-
-func formatType(type_oid, typemod string) string { return "" }
-
-func show(name string) string { return "" }
 
 type Server struct {
 	mu    sync.Mutex
@@ -266,6 +202,20 @@ func (s *Server) serveConnStartup(ctx context.Context, c *Conn) error {
 	}
 }
 
+func buildConnectionString(params map[string]string) string {
+	user, _ := params["user"]
+	password, _ := params["password"]
+	fmt.Println(password)
+	database, _ := params["database"]
+	var query = url.URL{
+		Scheme: "vertica",
+		User:   url.UserPassword(user, password),
+		Host:   "localhost:15433",
+		Path:   database,
+	}
+	return query.String()
+}
+
 func (s *Server) handleStartupMessage(ctx context.Context, c *Conn, msg *pgproto3.StartupMessage) (err error) {
 	log.Printf("received startup message: %#v", msg)
 
@@ -277,38 +227,14 @@ func (s *Server) handleStartupMessage(ctx context.Context, c *Conn, msg *pgproto
 		return writeMessages(c, &pgproto3.ErrorResponse{Message: "invalid database name"})
 	}
 
-	// Open SQL database & attach to the connection.
-	if c.db, err = sql.Open("postlite-sqlite3", filepath.Join(s.DataDir, name)); err != nil {
+	var connectionString = buildConnectionString(msg.Parameters)
+	fmt.Println(connectionString)
+
+	if c.db, err = sql.Open("vertica", connectionString); err != nil {
 		return err
 	}
 
-	// Attach an in-memory database for pg_catalog.
-	if _, err := c.db.ExecContext(ctx, `ATTACH ':memory:' AS pg_catalog`); err != nil {
-		return fmt.Errorf("attach pg_catalog: %w", err)
-	}
-
-	// Register virtual tables to imitate postgres.
-	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_catalog.pg_namespace USING pg_namespace_module (oid, nspname, nspowner, nspacl)"); err != nil {
-		return fmt.Errorf("create pg_namespace: %w", err)
-	}
-	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_catalog.pg_description USING pg_description_module (objoid, classoid, objsubid, description)"); err != nil {
-		return fmt.Errorf("create pg_description: %w", err)
-	}
-	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_catalog.pg_database USING pg_database_module (oid, datname, datdba, encoding, datcollate, datctype, datistemplate, datallowconn, datconnlimit, datlastsysoid, datfrozenxid, datminmxid, dattablespace, datacl)"); err != nil {
-		return fmt.Errorf("create pg_database: %w", err)
-	}
-	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_catalog.pg_settings USING pg_settings_module (name, setting, unit, category, short_desc, extra_desc, context, vartype, source, min_val, max_val, enumvals, boot_val, reset_val, sourcefile, sourceline, pending_restart)"); err != nil {
-		return fmt.Errorf("create pg_settings: %w", err)
-	}
-	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_catalog.pg_type USING pg_type_module (oid, typname, typnamespace, typowner, typlen, typbyval, typtype, typcategory, typispreferred, typisdefined, typdelim, typrelid, typelem, typarray, typinput, typoutput, typreceive, typsend, typmodin, typmodout, typanalyze, typalign, typstorage, typnotnull, typbasetype, typtypmod, typndims, typcollation, typdefaultbin, typdefault, typacl)"); err != nil {
-		return fmt.Errorf("create pg_type: %w", err)
-	}
-	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_catalog.pg_class USING pg_class_module (oid, relname, relnamespace, reltype, reloftype, relowner, relam, relfilenode, reltablespace, relpages, reltuples, relallvisible, reltoastrelid, relhasindex, relisshared, relpersistence, relkind, relnatts, relchecks, relhasrules, relhastriggers, relhassubclass, relrowsecurity, relforcerowsecurity, relispopulated, relreplident, relispartition, relrewrite, relfrozenxid, relminmxid, relacl, reloptions, relpartbound)"); err != nil {
-		return fmt.Errorf("create pg_class: %w", err)
-	}
-	if _, err := c.db.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS pg_catalog.pg_range USING pg_range_module (rngtypid, rngsubtype, rngmultitypid, rngcollation, rngsubopc, rngcanonical, rngsubdiff)"); err != nil {
-		return fmt.Errorf("create pg_range: %w", err)
-	}
+	setupDBServer(ctx, c.db)
 
 	return writeMessages(c,
 		&pgproto3.AuthenticationOk{},
